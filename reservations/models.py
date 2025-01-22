@@ -49,9 +49,9 @@ class Client(models.Model):
         verbose_name='Дата заказа')
 
     def get_order_status(self):
-        # Определяет статус заказа
+        """Определяет статус заказа."""
         if self.storage_duration is None:
-            return "Не указано"  # статус для отсутствия срока хранения
+            return "Не указано"  # статус для случая отсутствия срока хранения
 
         expiration_date = self.order_date + timedelta(
             days=self.storage_duration)  # Дата окончания хранения
