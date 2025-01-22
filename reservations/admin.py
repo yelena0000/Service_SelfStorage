@@ -5,6 +5,7 @@ from .models import Client
 class ClientAdmin(admin.ModelAdmin):
     list_display = (
         'full_name',
+        'order_type',
         'order_date',
         'storage_duration',
         'get_order_status',
