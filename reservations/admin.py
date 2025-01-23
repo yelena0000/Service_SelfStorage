@@ -47,7 +47,7 @@ class OrderAdmin(admin.ModelAdmin):
     storage_unit.short_description = 'Ячейка хранения'
 
     def total_cost(self, obj):
-        return obj.calculated_total_cost        # Используйте новое имя свойства
+        return obj.calculated_total_cost
     total_cost.short_description = 'Стоимость'
 
     def get_warehouse(self, obj):
