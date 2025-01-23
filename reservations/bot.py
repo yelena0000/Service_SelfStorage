@@ -1,23 +1,35 @@
 import logging
-import telegram
+import os
+import random
+import re
+from datetime import datetime, timedelta
+
+import django
+from django.core.exceptions import ValidationError
+from environs import Env
 from telegram import (
     Bot,
-    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
+    Update,
 )
 from telegram.ext import (
-    Updater,
-    CommandHandler,
     CallbackContext,
     CallbackQueryHandler,
+    CommandHandler,
     ConversationHandler,
-    MessageHandler,
     Filters,
+    MessageHandler,
+    Updater,
 )
-from environs import Env
+
+from reservations.models import Order, StorageUnit, User
+
+# Настройка Django
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'storage_bot.settings')
+django.setup()
 
 
 logging.basicConfig(
@@ -34,7 +46,6 @@ REQUEST_PHONE = 3
 REQUEST_START_DATE = 4
 REQUEST_DURATION = 5
 REQUEST_ADDRESS = 6
-
 
 
 def start(update: Update, context: CallbackContext):
@@ -70,23 +81,20 @@ def start(update: Update, context: CallbackContext):
     )
     return CONSENT
 
+
 def handle_consent(update: Update, context: CallbackContext):
     user_response = update.message.text
     if user_response == "Принять":
-        update.message.reply_text(
-            "Спасибо! Вы приняли условия обработки персональных данных. Теперь мы можем продолжить работу. 🛠️"
-        )
-
-        # Основное меню с кнопками
         reply_markup = ReplyKeyboardMarkup(
             [["Мой заказ", "Тарифы и условия хранения"], ["Заказать ячейку"]],
             resize_keyboard=True
         )
         update.message.reply_text(
+            "Спасибо! Вы приняли условия обработки персональных данных. Теперь мы можем продолжить работу. 🛠️\n\n"
             "Выберите действие из меню ниже:",
             reply_markup=reply_markup
         )
-        return MAIN_MENU
+        return ConversationHandler.END
     elif user_response == "Отказаться":
         # Повторно показываем кнопки
         reply_markup = ReplyKeyboardMarkup([["Принять"], ["Отказаться"]],
@@ -139,18 +147,11 @@ def handle_self_delivery(update: Update, context: CallbackContext):
         "📍 Если не знаете габариты ваших вещей или не хотите их измерять, все необходимые замеры произведут при приёме на склад!\n"
         "📦 Если вы передумаете ехать самостоятельно, вы всегда можете выбрать бесплатную доставку курьером!"
     )
-
-    # Кнопка для перехода на доставку курьером
-    keyboard = [
-        [InlineKeyboardButton("Доставить мои вещи курьером", callback_data="deliver_courier")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     update.callback_query.message.reply_text(
         self_delivery_info,
         parse_mode=telegram.ParseMode.MARKDOWN,
-        reply_markup=reply_markup
     )
+
 
 def handle_courier_delivery(update: Update, context: CallbackContext):
     update.callback_query.answer()
@@ -176,6 +177,7 @@ def handle_courier_delivery(update: Update, context: CallbackContext):
         reply_markup=reply_markup
     )
 
+
 def order_box(update: Update, context: CallbackContext):
     # Убираем кнопку из главного меню и выводим выбор метода доставки
     keyboard = [
@@ -192,7 +194,6 @@ def order_box(update: Update, context: CallbackContext):
 
 
 def start_order_form(update: Update, context: CallbackContext):
-    # Начинаем оформление заказа
     logger.info(f"Пользователь {update.effective_user.id} начал оформление заказа.")
     update.callback_query.answer()
     update.callback_query.message.reply_text(
@@ -203,66 +204,124 @@ def start_order_form(update: Update, context: CallbackContext):
 
 
 def request_name(update: Update, context: CallbackContext):
-    logger.info(f"Функция request_name вызвана пользователем {update.effective_user.id}")
-
     user_name = update.message.text.strip()
-
-    logger.info(f"Получено имя от пользователя {update.effective_user.id}: {user_name}")
+    if not re.match(r"^[А-ЯЁ][а-яё]+\s[А-ЯЁ][а-яё]+\s[А-ЯЁ][а-яё]+$", user_name):
+        update.message.reply_text("⚠️ Пожалуйста, укажите ваше ФИО в формате: Иванов Иван Иванович.")
+        return REQUEST_NAME
 
     context.user_data['name'] = user_name
-    update.message.reply_text("📞 Укажите ваш номер телефона (например: +79001234567):")
-
-    logger.info(f"Переход к состоянию REQUEST_PHONE для пользователя {update.effective_user.id}")
+    update.message.reply_text("📞 Укажите ваш номер телефона (например: +79991234567):")
     return REQUEST_PHONE
 
 
 def request_phone(update: Update, context: CallbackContext):
-    context.user_data['phone'] = update.message.text.strip()
+    phone = update.message.text.strip()
+    if not re.match(r"^\+7\d{10}$", phone):
+        update.message.reply_text("⚠️ Пожалуйста, укажите корректный номер телефона в формате: +79991234567.")
+        return REQUEST_PHONE
+
+    context.user_data['phone'] = phone
     update.message.reply_text("📅 Укажите дату начала хранения (в формате ДД.ММ.ГГГГ):")
     return REQUEST_START_DATE
 
 
 def request_start_date(update: Update, context: CallbackContext):
-    context.user_data['start_date'] = update.message.text.strip()
+    start_date_str = update.message.text.strip()
+    try:
+        start_date = datetime.strptime(start_date_str, "%d.%m.%Y")
+        if start_date.date() < datetime.now().date():
+            update.message.reply_text("⚠️ Дата начала хранения не может быть в прошлом.")
+            return REQUEST_START_DATE
+    except ValueError:
+        update.message.reply_text("⚠️ Укажите дату в формате ДД.ММ.ГГГГ.")
+        return REQUEST_START_DATE
+
+    context.user_data['start_date'] = start_date
     update.message.reply_text("📦 Укажите срок хранения в днях (например: 30):")
     return REQUEST_DURATION
 
 
 def request_duration(update: Update, context: CallbackContext):
     try:
-        context.user_data['storage_duration'] = int(update.message.text.strip())
+        duration = int(update.message.text.strip())
+        if duration <= 0:
+            raise ValueError
+        context.user_data['storage_duration'] = duration
         update.message.reply_text("📍 Укажите адрес, откуда нужно забрать вещи (например: г. Москва, ул. Ленина, д. 10):")
         return REQUEST_ADDRESS
     except ValueError:
-        update.message.reply_text("⚠️ Пожалуйста, введите срок хранения числом.")
+        update.message.reply_text("⚠️ Пожалуйста, введите корректный срок хранения в днях (число дней не может быть отрицательным).")
         return REQUEST_DURATION
 
 
 def request_address(update: Update, context: CallbackContext):
     context.user_data['address'] = update.message.text.strip()
 
-    # Подтверждение всех введённых данных
-    update.message.reply_text(
-        "✅ Спасибо! Ваш заказ принят.\n\n"
-        f"📋 *Детали заказа:*\n"
-        f"👤 ФИО: {context.user_data['name']}\n"
-        f"📞 Телефон: {context.user_data['phone']}\n"
-        f"📅 Дата начала хранения: {context.user_data['start_date']}\n"
-        f"📦 Срок хранения: {context.user_data['storage_duration']} дней\n"
-        f"📍 Адрес: {context.user_data['address']}\n\n"
-        "Курьер свяжется с вами в ближайшее время. 😊",
-        parse_mode=telegram.ParseMode.MARKDOWN
+    # Создаем или находим пользователя в базе данных
+    user, created = User.objects.get_or_create(
+        user_id=update.effective_user.id,
+        defaults={
+            'name': context.user_data['name'],
+            'phone_number': context.user_data['phone'],
+        }
     )
+    if not created:  # Если пользователь уже существует, обновим данные
+        user.name = context.user_data['name']
+        user.phone_number = context.user_data['phone']
+        user.save()
+
+    # Ищем свободную ячейку
+    free_units = StorageUnit.objects.filter(is_occupied=False)
+    if not free_units.exists():
+        update.message.reply_text("⚠️ На данный момент все ячейки заняты. Попробуйте позже.")
+        return ConversationHandler.END
+
+    # Рандомно выбираем свободную ячейку
+    selected_unit = random.choice(free_units)
+
+    # Создаем заказ
+    try:
+        order = Order.objects.create(
+            user=user,
+            storage_unit=selected_unit,
+            storage_duration=context.user_data['storage_duration']
+        )
+        update.message.reply_text(
+            "✅ Спасибо! Ваш заказ принят.\n\n"
+            f"📋 *Детали заказа:*\n"
+            f"👤 ФИО: {user.name}\n"
+            f"📞 Телефон: {user.phone_number}\n"
+            f"📅 Дата начала хранения: {context.user_data['start_date']}\n"
+            f"📦 Срок хранения: {context.user_data['storage_duration']} дней\n"
+            f"📍 Адрес: {context.user_data['address']}\n"
+            f"🏷️ Ячейка хранения: {selected_unit}\n\n"
+            "Курьер свяжется с вами в ближайшее время. 😊",
+            parse_mode=telegram.ParseMode.MARKDOWN
+        )
+    except ValidationError as e:
+        update.message.reply_text(f"⚠️ Ошибка при создании заказа: {e}")
+        return ConversationHandler.END
     reply_markup = ReplyKeyboardMarkup(
         [["Мой заказ", "Тарифы и условия хранения"], ["Заказать ячейку"]],
         resize_keyboard=True
     )
     update.message.reply_text(
-        "Заказ успешно оформлен. Если вас интересует что-то еще, выберите действие из меню ниже:",
+        "Если вас интересует что-то еще, выберите действие из меню ниже:",
+        reply_markup=reply_markup
+    )
+    return ConversationHandler.END
+
+
+def main_menu(update, context):
+    reply_markup = ReplyKeyboardMarkup(
+        [["Мой заказ", "Тарифы и условия хранения"], ["Заказать ячейку"]],
+        resize_keyboard=True
+    )
+    update.message.reply_text(
+        "Добро пожаловать в меню! Выберите действие:",
         reply_markup=reply_markup
     )
     return MAIN_MENU
-
 
 
 def handle_my_order(update: Update, context: CallbackContext):
@@ -286,20 +345,37 @@ def main():
     updater = Updater(token)
     dispatcher = updater.dispatcher
 
-    main_conv_handler = ConversationHandler(
+    start_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            CONSENT: [MessageHandler(Filters.regex("^(Принять|Отказаться)$"), handle_consent)],
-            MAIN_MENU: [
-                MessageHandler(Filters.regex("^Мой заказ$"), handle_my_order),
-                MessageHandler(Filters.regex("^Тарифы и условия хранения$"), tariffs),
-                MessageHandler(Filters.regex("^Заказать ячейку$"), order_box),
-                MessageHandler(Filters.text & ~Filters.command,
-                               lambda update, context: update.message.reply_text("Выберите пункт из меню!"))
+            CONSENT: [
+                MessageHandler(Filters.regex("^(Принять|Отказаться)$"), handle_consent),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+    main_menu_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("main_menu", main_menu),  # Вход в главное меню через эту команду
+            MessageHandler(Filters.regex("^Меню$"), main_menu),
+            MessageHandler(Filters.regex("^Мой заказ$"), handle_my_order),
+            MessageHandler(Filters.regex("^Тарифы и условия хранения$"), tariffs),
+            MessageHandler(Filters.regex("^Заказать ячейку$"), order_box),
+        ],
+        states={
+            MAIN_MENU: [
+                MessageHandler(Filters.regex("^Мой заказ$"), handle_my_order),
+                MessageHandler(Filters.regex("^Тарифы и условия хранения$"), tariffs),
+                MessageHandler(Filters.regex("^Заказать ячейку$"), order_box),
+                MessageHandler(
+                    Filters.text & ~Filters.command,
+                    lambda update, context: update.message.reply_text("Выберите пункт из меню!")
+                ),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
     order_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_order_form, pattern="^continue_order$")],
         states={
@@ -328,16 +404,13 @@ def main():
                 MessageHandler(Filters.all, lambda update, context: update.message.reply_text(
                     "Введите адрес в формате: г. Москва, ул. Ленина, д. 10"))
             ],
-            MAIN_MENU: [
-                MessageHandler(Filters.regex("^(Мой заказ|Тарифы и условия хранения|Заказать ячейку)$"),
-                               start_order_form)
-            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    dispatcher.add_handler(main_conv_handler)  # Основной ConversationHandler
+    dispatcher.add_handler(start_conv_handler)  # Стартовый ConversationHandler
     dispatcher.add_handler(order_conv_handler) # Отдельный ConversationHandler для оформления заказа
+    dispatcher.add_handler(main_menu_handler)
     dispatcher.add_handler(CallbackQueryHandler(handle_courier_delivery, pattern="^deliver_courier$"))
     dispatcher.add_handler(CallbackQueryHandler(handle_self_delivery, pattern="^self_delivery$"))
     dispatcher.add_handler(CallbackQueryHandler(start_order_form, pattern="^continue_order$"))
