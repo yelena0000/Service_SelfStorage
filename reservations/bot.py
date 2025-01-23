@@ -1,8 +1,10 @@
+import logging
 import telegram
 from telegram import (
     Bot,
     Update,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
 )
@@ -10,14 +12,30 @@ from telegram.ext import (
     Updater,
     CommandHandler,
     CallbackContext,
+    CallbackQueryHandler,
     ConversationHandler,
     MessageHandler,
     Filters,
 )
 from environs import Env
 
+
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 # Состояния для диалога
-CONSENT, MAIN_MENU = range(2)
+CONSENT = 0
+MAIN_MENU = 1
+REQUEST_NAME = 2
+REQUEST_PHONE = 3
+REQUEST_START_DATE = 4
+REQUEST_DURATION = 5
+REQUEST_ADDRESS = 6
+
+
 
 def start(update: Update, context: CallbackContext):
     welcome_message = (
@@ -32,8 +50,12 @@ def start(update: Update, context: CallbackContext):
     update.message.reply_text(welcome_message)
 
     # Отправляем файл с согласием на обработку данных
-    pdf_file = "reservations/consent_form.pdf"
-    context.bot.send_document(chat_id=update.effective_chat.id, document=open(pdf_file, "rb"))
+    pdf_file = "consent_form.pdf"
+    try:
+        with open(pdf_file, "rb") as file:
+            context.bot.send_document(chat_id=update.effective_chat.id, document=file)
+    except FileNotFoundError:
+        update.message.reply_text("Файл с соглашением не найден. Пожалуйста, попробуйте позже.")
 
     # Показываем кнопки для подтверждения
     reply_markup = ReplyKeyboardMarkup([["Принять"], ["Отказаться"]],
@@ -57,7 +79,7 @@ def handle_consent(update: Update, context: CallbackContext):
 
         # Основное меню с кнопками
         reply_markup = ReplyKeyboardMarkup(
-            [["Мой заказ", "Тарифы и условия хранения"], ["Заказать бокс"]],
+            [["Мой заказ", "Тарифы и условия хранения"], ["Заказать ячейку"]],
             resize_keyboard=True
         )
         update.message.reply_text(
@@ -88,7 +110,6 @@ def handle_consent(update: Update, context: CallbackContext):
         return CONSENT
 
 
-
 def tariffs(update: Update, context: CallbackContext):
     tariffs_info = (
         "📋 *Тарифы на хранение:*\n"
@@ -107,18 +128,6 @@ def tariffs(update: Update, context: CallbackContext):
     )
     update.message.reply_text(tariffs_info, parse_mode=telegram.ParseMode.MARKDOWN)
 
-def order_box(update: Update, context: CallbackContext):
-    # Создаёт инлайн-кнопки для выбора способа доставки
-    keyboard = [
-        [InlineKeyboardButton("Доставить мои вещи курьером", callback_data="deliver_courier")],
-        [InlineKeyboardButton("Привезу самостоятельно", callback_data="self_delivery")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    update.message.reply_text(
-        "Как вы хотите заказать бокс? Выберите один из вариантов ниже:",
-        reply_markup=reply_markup
-    )
 
 def handle_self_delivery(update: Update, context: CallbackContext):
     # Отображение адресов для самостоятельной доставки
@@ -144,18 +153,116 @@ def handle_self_delivery(update: Update, context: CallbackContext):
     )
 
 def handle_courier_delivery(update: Update, context: CallbackContext):
-    # Обработка выбора доставки курьером
+    update.callback_query.answer()
     courier_info = (
-        "📦 *Доставка курьером:*\n\n"
-        "Мы бесплатно заберём ваши вещи из дома или офиса. Для этого:\n"
-        "1️⃣ <сделайте ....>.\n"
-        "2️⃣ <.....>\n\n"
-        "📍 Курьер замерит вещи на месте."
+        "📦 *Курьерская доставка:*\n\n"
+        "Мы бесплатно заберём ваши вещи из дома или офиса. Все замеры будут произведены курьером на месте.\n\n"
+        "📋 *Процесс оформления заказа:*\n"
+        "1️⃣ Вы указываете свои данные (ФИО, телефон, адрес и срок хранения).\n"
+        "2️⃣ Курьер связывается с вами.\n"
+        "3️⃣ Мы забираем ваши вещи и помещаем их на хранение в ячейку.\n\n"
+        "🚚 Курьер приедет в удобное для вас время и заберёт вещи быстро и безопасно.\n\n"
+        "Нажмите *Продолжить оформление заказа*, чтобы ввести данные и завершить заказ."
     )
+
+    keyboard = [
+        [InlineKeyboardButton("Продолжить оформление заказа", callback_data="continue_order")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     update.callback_query.message.reply_text(
         courier_info,
+        parse_mode=telegram.ParseMode.MARKDOWN,
+        reply_markup=reply_markup
+    )
+
+def order_box(update: Update, context: CallbackContext):
+    # Убираем кнопку из главного меню и выводим выбор метода доставки
+    keyboard = [
+        [InlineKeyboardButton("Доставить мои вещи курьером", callback_data="deliver_courier")],
+        [InlineKeyboardButton("Привезу самостоятельно", callback_data="self_delivery")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    update.message.reply_text(
+        "Как вы хотите заказать ячейку? Выберите способ доставки.",
+        reply_markup=reply_markup
+    )
+    # Завершаем основной ConversationHandler, чтобы не было конфликтов
+    return ConversationHandler.END
+
+
+def start_order_form(update: Update, context: CallbackContext):
+    # Начинаем оформление заказа
+    logger.info(f"Пользователь {update.effective_user.id} начал оформление заказа.")
+    update.callback_query.answer()
+    update.callback_query.message.reply_text(
+        "👤 Для начала укажите ваше ФИО: (например: Иванов Иван Иванович)",
+        reply_markup=ReplyKeyboardRemove()  # Убираем главное меню
+    )
+    return REQUEST_NAME
+
+
+def request_name(update: Update, context: CallbackContext):
+    logger.info(f"Функция request_name вызвана пользователем {update.effective_user.id}")
+
+    user_name = update.message.text.strip()
+
+    logger.info(f"Получено имя от пользователя {update.effective_user.id}: {user_name}")
+
+    context.user_data['name'] = user_name
+    update.message.reply_text("📞 Укажите ваш номер телефона (например: +79001234567):")
+
+    logger.info(f"Переход к состоянию REQUEST_PHONE для пользователя {update.effective_user.id}")
+    return REQUEST_PHONE
+
+
+def request_phone(update: Update, context: CallbackContext):
+    context.user_data['phone'] = update.message.text.strip()
+    update.message.reply_text("📅 Укажите дату начала хранения (в формате ДД.ММ.ГГГГ):")
+    return REQUEST_START_DATE
+
+
+def request_start_date(update: Update, context: CallbackContext):
+    context.user_data['start_date'] = update.message.text.strip()
+    update.message.reply_text("📦 Укажите срок хранения в днях (например: 30):")
+    return REQUEST_DURATION
+
+
+def request_duration(update: Update, context: CallbackContext):
+    try:
+        context.user_data['storage_duration'] = int(update.message.text.strip())
+        update.message.reply_text("📍 Укажите адрес, откуда нужно забрать вещи (например: г. Москва, ул. Ленина, д. 10):")
+        return REQUEST_ADDRESS
+    except ValueError:
+        update.message.reply_text("⚠️ Пожалуйста, введите срок хранения числом.")
+        return REQUEST_DURATION
+
+
+def request_address(update: Update, context: CallbackContext):
+    context.user_data['address'] = update.message.text.strip()
+
+    # Подтверждение всех введённых данных
+    update.message.reply_text(
+        "✅ Спасибо! Ваш заказ принят.\n\n"
+        f"📋 *Детали заказа:*\n"
+        f"👤 ФИО: {context.user_data['name']}\n"
+        f"📞 Телефон: {context.user_data['phone']}\n"
+        f"📅 Дата начала хранения: {context.user_data['start_date']}\n"
+        f"📦 Срок хранения: {context.user_data['storage_duration']} дней\n"
+        f"📍 Адрес: {context.user_data['address']}\n\n"
+        "Курьер свяжется с вами в ближайшее время. 😊",
         parse_mode=telegram.ParseMode.MARKDOWN
     )
+    reply_markup = ReplyKeyboardMarkup(
+        [["Мой заказ", "Тарифы и условия хранения"], ["Заказать ячейку"]],
+        resize_keyboard=True
+    )
+    update.message.reply_text(
+        "Заказ успешно оформлен. Если вас интересует что-то еще, выберите действие из меню ниже:",
+        reply_markup=reply_markup
+    )
+    return MAIN_MENU
+
 
 
 def handle_my_order(update: Update, context: CallbackContext):
@@ -177,24 +284,63 @@ def main():
     bot = telegram.Bot(token=token)
 
     updater = Updater(token)
-
     dispatcher = updater.dispatcher
-    conv_handler = ConversationHandler(
+
+    main_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
-            CONSENT: [MessageHandler(Filters.text & ~Filters.command, handle_consent)],
+            CONSENT: [MessageHandler(Filters.regex("^(Принять|Отказаться)$"), handle_consent)],
             MAIN_MENU: [
-                MessageHandler(Filters.regex("Мой заказ"), handle_my_order),
-                MessageHandler(Filters.regex("Тарифы и условия хранения"), tariffs),
-                MessageHandler(Filters.regex("Заказать бокс"), order_box),
+                MessageHandler(Filters.regex("^Мой заказ$"), handle_my_order),
+                MessageHandler(Filters.regex("^Тарифы и условия хранения$"), tariffs),
+                MessageHandler(Filters.regex("^Заказать ячейку$"), order_box),
+                MessageHandler(Filters.text & ~Filters.command,
+                               lambda update, context: update.message.reply_text("Выберите пункт из меню!"))
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    order_conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_order_form, pattern="^continue_order$")],
+        states={
+            REQUEST_NAME: [
+                MessageHandler(Filters.text & ~Filters.command, request_name),
+                MessageHandler(Filters.all,
+                               lambda update, context: update.message.reply_text("Пожалуйста, введите ФИО текстом."))
+            ],
+            REQUEST_PHONE: [
+                MessageHandler(Filters.text & ~Filters.command, request_phone),
+                MessageHandler(Filters.all, lambda update, context: update.message.reply_text(
+                    "Введите номер телефона в формате +79001234567."))
+            ],
+            REQUEST_START_DATE: [
+                MessageHandler(Filters.text & ~Filters.command, request_start_date),
+                MessageHandler(Filters.all,
+                               lambda update, context: update.message.reply_text("Введите дату в формате ДД.ММ.ГГГГ."))
+            ],
+            REQUEST_DURATION: [
+                MessageHandler(Filters.text & ~Filters.command, request_duration),
+                MessageHandler(Filters.all, lambda update, context: update.message.reply_text(
+                    "Введите срок хранения числом (например: 30)."))
+            ],
+            REQUEST_ADDRESS: [
+                MessageHandler(Filters.text & ~Filters.command, request_address),
+                MessageHandler(Filters.all, lambda update, context: update.message.reply_text(
+                    "Введите адрес в формате: г. Москва, ул. Ленина, д. 10"))
+            ],
+            MAIN_MENU: [
+                MessageHandler(Filters.regex("^(Мой заказ|Тарифы и условия хранения|Заказать ячейку)$"),
+                               start_order_form)
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    dispatcher.add_handler(conv_handler)
-    dispatcher.add_handler(telegram.ext.CallbackQueryHandler(handle_courier_delivery, pattern="^deliver_courier$"))
-    dispatcher.add_handler(telegram.ext.CallbackQueryHandler(handle_self_delivery, pattern="^self_delivery$"))
+    dispatcher.add_handler(main_conv_handler)  # Основной ConversationHandler
+    dispatcher.add_handler(order_conv_handler) # Отдельный ConversationHandler для оформления заказа
+    dispatcher.add_handler(CallbackQueryHandler(handle_courier_delivery, pattern="^deliver_courier$"))
+    dispatcher.add_handler(CallbackQueryHandler(handle_self_delivery, pattern="^self_delivery$"))
+    dispatcher.add_handler(CallbackQueryHandler(start_order_form, pattern="^continue_order$"))
 
     # Запуск бота
     updater.start_polling()
