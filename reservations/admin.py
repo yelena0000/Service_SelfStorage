@@ -31,6 +31,7 @@ class OrderAdmin(admin.ModelAdmin):
         'storage_duration',                     # Срок хранения
         'status_display',                       # Статус заказа
         'total_cost',                           # Стоимость заказа
+        'reminder_date',                        # Дата когда нужно запустить напоминалку
     )
     list_filter = ('status', )
 
@@ -79,6 +80,9 @@ class OrderAdmin(admin.ModelAdmin):
             messages.success(request, "Ячейка успешно освобождена.")
         super().delete_model(request, obj)                  # Удаляем заказ
 
+    def reminder_date(self, obj):
+        return obj.reminder_date()
+    reminder_date.short_description = 'Дата напоминалки'
 
 @admin.register(Warehouse)
 class WarehouseAdmin(admin.ModelAdmin):
@@ -109,17 +113,6 @@ class StorageUnitAdmin(admin.ModelAdmin):
         return active_order.user.name if active_order else "Нет"
 
     get_user_name.short_description = 'Кем занята'
-
-
-# @admin.register(Reminder)
-# class ReminderAdmin(admin.ModelAdmin):
-#     list_display = ('reminder_id', 'user', 'message', 'reminder_date')
-
-
-
-# Добавить название складов, а не в носить в ручную
-# Дата проставляется окончания?
-
 
 
 
