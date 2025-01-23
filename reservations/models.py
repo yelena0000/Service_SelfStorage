@@ -164,6 +164,10 @@ class Order(models.Model):
             return self.storage_duration * 500  # 500 р/день
         return 0
 
+    def reminder_date(self):
+        # Расчет даты напоминания о окончания срока хранения
+        return self.created_at + timedelta(days=self.storage_duration-14)
+
 
 # Сигналы для освобождения ячейки при удалении пользователя
 @receiver(post_delete, sender=User)
@@ -174,30 +178,6 @@ def user_post_delete_handler(sender, instance, **kwargs):
     for order in orders:
         order.release_storage_unit()
         order.delete()  # Удаляем заказ
- 
-
-# Напоминания
-# class Reminder(models.Model):
-#     reminder_id = models.AutoField(primary_key=True)
-#     user = models.ForeignKey(
-#         User,
-#         on_delete=models.CASCADE,
-#         verbose_name='Пользователь'
-#     )  # Связь с пользователем
-#     message = models.TextField(
-#         verbose_name='Текст напоминания'
-#     )  # Текст напоминания
-#     reminder_date = models.DateTimeField(
-#         verbose_name='Дата отправки напоминания'
-#     )   # Дата отправки напоминания
-
-#     def __str__(self):
-#         return f"Напоминание для {self.user.name}: {self.message}"
-
-# Можно реализовать логику, так: от даты создания вычесть на 14 дней меньше срока хранения и уже полодить в бд, бот может смотреть по дате и когда подходит забирать
-
-
-
 
 
 
