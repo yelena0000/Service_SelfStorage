@@ -5,7 +5,9 @@ import re
 from datetime import datetime, timedelta
 
 import django
+import telegram
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from environs import Env
 from telegram import (
     Bot,
@@ -25,12 +27,11 @@ from telegram.ext import (
     Updater,
 )
 
-from reservations.models import Order, StorageUnit, User
-
 # Настройка Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'storage_bot.settings')
 django.setup()
 
+from reservations.models import Order, StorageUnit, User
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -138,19 +139,33 @@ def tariffs(update: Update, context: CallbackContext):
 
 
 def handle_self_delivery(update: Update, context: CallbackContext):
-    # Отображение адресов для самостоятельной доставки
+    update.callback_query.answer()
+    context.user_data['delivery_type'] = "self_delivery"
     self_delivery_info = (
         "🚗 *Пункты приёма вещей для самостоятельной доставки:*\n\n"
-        "1️⃣ <Адрес 1>\n"
-        "2️⃣ <Адрес 2>\n"
-        "3️⃣ <Адрес 3>\n\n"
-        "📍 Если не знаете габариты ваших вещей или не хотите их измерять, все необходимые замеры произведут при приёме на склад!\n"
-        "📦 Если вы передумаете ехать самостоятельно, вы всегда можете выбрать бесплатную доставку курьером!"
+        "1️⃣ Адрес: Москва, ул. Ленина, д. 10\n"
+        "2️⃣ Адрес: Санкт-Петербург, ул. Невский, д. 20\n"
+        "3️⃣ Адрес: Казань, ул. Баумана, д. 5\n\n"
+        "📍 Если у вас есть вопросы, наш персонал произведет все замеры на месте."
     )
+    keyboard = [
+        [InlineKeyboardButton("Продолжить оформление заказа", callback_data="continue_order_self_delivery")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
     update.callback_query.message.reply_text(
         self_delivery_info,
         parse_mode=telegram.ParseMode.MARKDOWN,
+        reply_markup=reply_markup
     )
+
+
+def start_order_form_self_delivery(update: Update, context: CallbackContext):
+    update.callback_query.answer()
+    update.callback_query.message.reply_text(
+        "👤 Для начала укажите ваше ФИО: (например: Иванов Иван Иванович)",
+        reply_markup=ReplyKeyboardRemove()  # Убираем главное меню
+    )
+    return REQUEST_NAME
 
 
 def handle_courier_delivery(update: Update, context: CallbackContext):
@@ -229,6 +244,7 @@ def request_start_date(update: Update, context: CallbackContext):
     start_date_str = update.message.text.strip()
     try:
         start_date = datetime.strptime(start_date_str, "%d.%m.%Y")
+        start_date = timezone.make_aware(start_date)
         if start_date.date() < datetime.now().date():
             update.message.reply_text("⚠️ Дата начала хранения не может быть в прошлом.")
             return REQUEST_START_DATE
@@ -247,14 +263,39 @@ def request_duration(update: Update, context: CallbackContext):
         if duration <= 0:
             raise ValueError
         context.user_data['storage_duration'] = duration
-        update.message.reply_text("📍 Укажите адрес, откуда нужно забрать вещи (например: г. Москва, ул. Ленина, д. 10):")
-        return REQUEST_ADDRESS
+
+        # Проверяем тип доставки
+        delivery_type = context.user_data.get('delivery_type')
+        if delivery_type == "self_delivery":
+            return finalize_order_self(update, context, delivery_type="self_delivery")
+
+        else:# Если доставка курьером, запрашиваем адрес
+            update.message.reply_text(
+                "📍 Укажите адрес, откуда нужно забрать вещи (например: г. Москва, ул. Ленина, д. 10):"
+            )
+            return REQUEST_ADDRESS
     except ValueError:
-        update.message.reply_text("⚠️ Пожалуйста, введите корректный срок хранения в днях (число дней не может быть отрицательным).")
+        update.message.reply_text(
+            "⚠️ Пожалуйста, введите корректный срок хранения в днях (число дней не может быть отрицательным)."
+        )
         return REQUEST_DURATION
 
 
-def request_address(update: Update, context: CallbackContext):
+def request_duration_self_delivery(update: Update, context: CallbackContext):
+    try:
+        duration = int(update.message.text.strip())
+        if duration <= 0:
+            raise ValueError
+        context.user_data['storage_duration'] = duration
+
+        # Завершение заказа
+        return finalize_order_self(update, context, delivery_type="self_delivery")
+    except ValueError:
+        update.message.reply_text("⚠️ Пожалуйста, введите корректный срок хранения в днях.")
+        return REQUEST_DURATION
+
+
+def finalize_order_courier(update: Update, context: CallbackContext):
     context.user_data['address'] = update.message.text.strip()
 
     # Создаем или находим пользователя в базе данных
@@ -283,6 +324,7 @@ def request_address(update: Update, context: CallbackContext):
     try:
         order = Order.objects.create(
             user=user,
+            created_at=context.user_data['start_date'],
             storage_unit=selected_unit,
             storage_duration=context.user_data['storage_duration']
         )
@@ -296,6 +338,61 @@ def request_address(update: Update, context: CallbackContext):
             f"📍 Адрес: {context.user_data['address']}\n"
             f"🏷️ Ячейка хранения: {selected_unit}\n\n"
             "Курьер свяжется с вами в ближайшее время. 😊",
+            parse_mode=telegram.ParseMode.MARKDOWN
+        )
+    except ValidationError as e:
+        update.message.reply_text(f"⚠️ Ошибка при создании заказа: {e}")
+        return ConversationHandler.END
+    reply_markup = ReplyKeyboardMarkup(
+        [["Мой заказ", "Тарифы и условия хранения"], ["Заказать ячейку"]],
+        resize_keyboard=True
+    )
+    update.message.reply_text(
+        "Если вас интересует что-то еще, выберите действие из меню ниже:",
+        reply_markup=reply_markup
+    )
+    return ConversationHandler.END
+
+
+def finalize_order_self(update: Update, context: CallbackContext, delivery_type="courier"):
+    user, created = User.objects.get_or_create(
+        user_id=update.effective_user.id,
+        defaults={
+            'name': context.user_data['name'],
+            'phone_number': context.user_data['phone'],
+        }
+    )
+    if not created:  # Если пользователь уже существует, обновим данные
+        user.name = context.user_data['name']
+        user.phone_number = context.user_data['phone']
+        user.save()
+
+    # Ищем свободную ячейку
+    free_units = StorageUnit.objects.filter(is_occupied=False)
+    if not free_units.exists():
+        update.message.reply_text("⚠️ На данный момент все ячейки заняты. Попробуйте позже.")
+        return ConversationHandler.END
+
+    # Рандомно выбираем свободную ячейку
+    selected_unit = random.choice(free_units)
+
+    # Создаем заказ
+    try:
+        order = Order.objects.create(
+            user=user,
+            created_at=context.user_data['start_date'],
+            storage_unit=selected_unit,
+            storage_duration=context.user_data['storage_duration']
+        )
+        update.message.reply_text(
+            "✅ Спасибо! Ваш заказ принят.\n\n"
+            f"📋 *Детали заказа:*\n"
+            f"👤 ФИО: {user.name}\n"
+            f"📞 Телефон: {user.phone_number}\n"
+            f"📅 Дата начала хранения: {context.user_data['start_date']}\n"
+            f"📦 Срок хранения: {context.user_data['storage_duration']} дней\n"
+            f"📍 Самостоятельная доставка\n"
+            f"🏷️ Ячейка хранения: {selected_unit}\n\n",
             parse_mode=telegram.ParseMode.MARKDOWN
         )
     except ValidationError as e:
@@ -377,32 +474,27 @@ def main():
     )
 
     order_conv_handler = ConversationHandler(
-        entry_points=[CallbackQueryHandler(start_order_form, pattern="^continue_order$")],
+        entry_points=[
+            CallbackQueryHandler(start_order_form, pattern="^continue_order$"),
+            CallbackQueryHandler(start_order_form_self_delivery, pattern="^continue_order_self_delivery$")
+        ],
         states={
             REQUEST_NAME: [
                 MessageHandler(Filters.text & ~Filters.command, request_name),
-                MessageHandler(Filters.all,
-                               lambda update, context: update.message.reply_text("Пожалуйста, введите ФИО текстом."))
             ],
             REQUEST_PHONE: [
                 MessageHandler(Filters.text & ~Filters.command, request_phone),
-                MessageHandler(Filters.all, lambda update, context: update.message.reply_text(
-                    "Введите номер телефона в формате +79001234567."))
             ],
             REQUEST_START_DATE: [
                 MessageHandler(Filters.text & ~Filters.command, request_start_date),
-                MessageHandler(Filters.all,
-                               lambda update, context: update.message.reply_text("Введите дату в формате ДД.ММ.ГГГГ."))
             ],
             REQUEST_DURATION: [
                 MessageHandler(Filters.text & ~Filters.command, request_duration),
-                MessageHandler(Filters.all, lambda update, context: update.message.reply_text(
-                    "Введите срок хранения числом (например: 30)."))
+                #MessageHandler(Filters.text & ~Filters.command, request_duration_self_delivery),
             ],
             REQUEST_ADDRESS: [
-                MessageHandler(Filters.text & ~Filters.command, request_address),
-                MessageHandler(Filters.all, lambda update, context: update.message.reply_text(
-                    "Введите адрес в формате: г. Москва, ул. Ленина, д. 10"))
+                #MessageHandler(Filters.text & ~Filters.command, finalize_order_self),
+                MessageHandler(Filters.text & ~Filters.command, finalize_order_courier),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
