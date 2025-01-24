@@ -11,6 +11,7 @@ class User(models.Model):
     user_id = models.AutoField('id пользователя', primary_key=True)
     name = models.CharField(verbose_name='Имя пользователя', max_length=200)
     phone_number = models.CharField(verbose_name='Телефон', max_length=20)
+    user_address = models.CharField(verbose_name='Адрес клиента', max_length=200, null=True, blank=True)
 
     class Meta:
         verbose_name_plural = 'Пользователи'
@@ -25,8 +26,9 @@ class User(models.Model):
 
 # Модель склада
 class Warehouse(models.Model):
-    warehouse_id = models.AutoField(primary_key=True, verbose_name='ID склада')
-    name = models.CharField(max_length=255, verbose_name='Название склада')
+    warehouse_id = models.AutoField(verbose_name='ID склада', primary_key=True)
+    name = models.CharField(verbose_name='Название склада', max_length=255)
+    warehouse_adress = models.CharField(verbose_name='Адрес склада', max_length=255, null=True, blank=True)
 
     class Meta:
         verbose_name_plural = 'Склады'
