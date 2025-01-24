@@ -11,8 +11,10 @@ class User(models.Model):
     user_id = models.AutoField('id пользователя', primary_key=True)
     name = models.CharField(verbose_name='Имя пользователя', max_length=200)
     phone_number = models.CharField(verbose_name='Телефон', max_length=20)
+    user_address = models.CharField(verbose_name='Адрес клиента', max_length=200, null=True, blank=True)
 
     class Meta:
+        verbose_name = 'Пользователь'
         verbose_name_plural = 'Пользователи'
 
     def __str__(self):
@@ -25,17 +27,19 @@ class User(models.Model):
 
 # Модель склада
 class Warehouse(models.Model):
-    warehouse_id = models.AutoField(primary_key=True, verbose_name='ID склада')
-    name = models.CharField(max_length=255, verbose_name='Название склада')
+    warehouse_id = models.AutoField(verbose_name='ID склада', primary_key=True)
+    name = models.CharField(verbose_name='Название склада', max_length=255)
+    warehouse_address = models.CharField(verbose_name='Адрес склада', max_length=255, null=True, blank=True)
 
     class Meta:
+        verbose_name = 'Склад'
         verbose_name_plural = 'Склады'
 
     def __str__(self):
         return self.name
 
     def save(self, *args, **kwargs):
-        # Сохраняем склад
+        # Сохраняем склад и создает ячейки хранения
         super().save(*args, **kwargs)
 
         # Создаем ячейки хранения только если они еще не созданы
@@ -57,23 +61,13 @@ class StorageUnit(models.Model):
         ('large', 'Большая (более 5 м³)'),
     ]
 
-    unit_id = models.AutoField(
-        primary_key=True,
-        verbose_name='ID ячейки'
-    )
-    warehouse = models.ForeignKey(
-        Warehouse,
-        on_delete=models.CASCADE,
-        verbose_name='Склад'
-    )
-    size = models.CharField(
-        max_length=10,
-        choices=SIZE_CHOICES,
-        verbose_name='Размер ячейки'
-    )
+    unit_id = models.AutoField(primary_key=True, verbose_name='ID ячейки')
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, verbose_name='Склад')
+    size = models.CharField(max_length=10, choices=SIZE_CHOICES, verbose_name='Размер ячейки')
     is_occupied = models.BooleanField(default=False, verbose_name='Занятость')
 
     class Meta:
+        verbose_name = 'Бокс хранения'
         verbose_name_plural = 'Боксы хранения'
 
     def __str__(self):
@@ -83,39 +77,34 @@ class StorageUnit(models.Model):
         # Проверяет, есть ли активные заказы для данной ячейки
         return Order.objects.filter(storage_unit=self, status='active').exists()
 
+    def is_available(self, start_date, duration):
+        end_date = start_date + timedelta(days=duration)
+        overlapping_orders = Order.objects.filter(
+            storage_unit=self,
+            start_date__lt=end_date,
+            created_at__gt=start_date
+        )
+        return not overlapping_orders.exists()
+
 
 # Заказ
 class Order(models.Model):
     STATUS_CHOICES = [
+        ('pending', 'Ожидает'),
         ('active', 'Активен'),
         ('expired', 'Просрочен'),
         ('completed', 'Закончен'),
     ]
-
-    created_at = models.DateTimeField(
-        default=timezone.now,
-        verbose_name='Дата создания заказа',
-    )
+    created_at = models.DateTimeField(default=timezone.now, verbose_name='Дата создания заказа')
     order_id = models.AutoField(primary_key=True)
-    user = models.ForeignKey(
-        User,
-        on_delete=models.CASCADE,
-        verbose_name='Пользователь',
-    )
-    storage_unit = models.ForeignKey(
-        StorageUnit,
-        on_delete=models.CASCADE,
-        verbose_name='Ячейка хранения'
-    )
+    user = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='Пользователь')
+    storage_unit = models.ForeignKey(StorageUnit, on_delete=models.CASCADE, verbose_name='Ячейка хранения')
     storage_duration = models.PositiveIntegerField(verbose_name='Срок хранения (дни)')
-    status = models.CharField(
-        max_length=15,
-        choices=STATUS_CHOICES,
-        default='active',
-        verbose_name='Статус заказа'
-    )
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='active', verbose_name='Статус заказа')
+    start_date = models.DateTimeField(verbose_name='Дата начала аренды', default=timezone.now)
 
     class Meta:
+        verbose_name = 'Заказ'
         verbose_name_plural = 'Заказы'
 
     def __str__(self):
@@ -123,28 +112,34 @@ class Order(models.Model):
 
     def is_expired(self):
         # Проверяет, просрочен ли заказ
-        expiration_date = self.created_at + timedelta(days=self.storage_duration)
-        return timezone.now() > expiration_date
+        return timezone.now() > self.start_date + timedelta(days=self.storage_duration)
 
     def save(self, *args, **kwargs):
         # Активные заказы для ячейки перед сохранением нового заказа
-        if self.storage_unit.has_active_orders():
-            raise ValidationError("Ошибка: Ячейка уже занята активным заказом.")
+        now = timezone.now()
 
-        # Статуса заказа
-        if self.storage_duration <= 0:
-            self.status = 'expired'
+        if not self.pk:  # Если это новый заказ
+            # Проверяем, не занята ли ячейка на указанный период
+            overlapping_orders = Order.objects.filter(
+                storage_unit=self.storage_unit,
+                start_date__lt=self.start_date + timedelta(days=self.storage_duration),
+                status__in=['active', 'pending']
+            )
+            if overlapping_orders.exists():
+                raise ValidationError("Ячейка уже забронирована на этот период.")
+
+        # Устанавливаем статус заказа
+        if self.start_date > now:
+            self.status = 'pending'     # Если дата начала в будущем
+        elif self.start_date <= now < self.start_date + timedelta(days=self.storage_duration):
+            self.status = 'active'      # Если текущая дата в пределах срока аренды
         else:
-            expiration_date = self.created_at + timedelta(days=self.storage_duration)
-            if timezone.now() > expiration_date:
-                self.status = 'expired'
-            else:
-                self.status = 'active'
+            self.status = 'expired'     # Если текущая дата после окончания срока аренды
 
-        super().save(*args, **kwargs)  # Сохраняем заказ
+        super().save(*args, **kwargs)
 
-        # Занятость ячейки после успешного сохранения заказа
-        self.storage_unit.is_occupied = True
+        # Обновляем занятость ячейки
+        self.storage_unit.is_occupied = self.status in ['active', 'pending']
         self.storage_unit.save()
 
     def release_storage_unit(self):
@@ -156,172 +151,32 @@ class Order(models.Model):
     @property
     def calculated_total_cost(self):
         # Свойство возвращает общую стоимость хранения на основе размера ячейки и срока хранения
-        if self.storage_unit.size == 'small':
-            return self.storage_duration * 100  # 100 р/день
-        elif self.storage_unit.size == 'medium':
-            return self.storage_duration * 300  # 300 р/день
-        elif self.storage_unit.size == 'large':
-            return self.storage_duration * 500  # 500 р/день
-        return 0
+        costs = {'small': 100, 'medium': 300, 'large': 500}
+        return self.storage_duration * costs.get(self.storage_unit.size, 0)
+
+    def reminder_date(self):
+        # Расчет даты напоминания о окончания срока хранения
+        if self.storage_duration <= 14:
+            return self.start_date
+        return self.start_date + timedelta(days=self.storage_duration-14) if self.start_date else None
 
 
 # Сигналы для освобождения ячейки при удалении пользователя
 @receiver(post_delete, sender=User)
 def user_post_delete_handler(sender, instance, **kwargs):
-    # Освобождает все ячейки хранения для заказов пользователя
     orders = Order.objects.filter(user=instance)
-
     for order in orders:
         order.release_storage_unit()
         order.delete()  # Удаляем заказ
- 
 
-# Напоминания
-# class Reminder(models.Model):
-#     reminder_id = models.AutoField(primary_key=True)
-#     user = models.ForeignKey(
-#         User,
-#         on_delete=models.CASCADE,
-#         verbose_name='Пользователь'
-#     )  # Связь с пользователем
-#     message = models.TextField(
-#         verbose_name='Текст напоминания'
-#     )  # Текст напоминания
-#     reminder_date = models.DateTimeField(
-#         verbose_name='Дата отправки напоминания'
-#     )   # Дата отправки напоминания
 
-#     def __str__(self):
-#         return f"Напоминание для {self.user.name}: {self.message}"
+# Реклама
+class Advertisement(models.Model):
+    promo_id = models.AutoField(primary_key=True)
+    promo_name = models.CharField(verbose_name='', max_length=200)
 
-# Можно реализовать логику, так: от даты создания вычесть на 14 дней меньше срока хранения и уже полодить в бд, бот может смотреть по дате и когда подходит забирать
+    class Meta:
+        verbose_name_plural = 'Реклама'
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# # Пользователь
-# class User(models.Model):
-#     user_id = models.AutoField('id пользователя', primary_key=True)
-#     name = models.CharField(verbose_name='Имя пользователя', max_length=255)
-#     phone_number = models.CharField(verbose_name='Тел.', max_length=20)
-#     # consent_pdf = models.FileField(upload_to='consent_pdfs/')  # Путь к PDF с согласием
-
-#     def __str__(self):
-#         return self.name
-
-
-# # Заказ
-# class Order(models.Model):
-#     STATUS_CHOICES = [
-#         ('Тарифы хранения', 'Тарифы хранения'),
-#         ('Забор курьером', 'Забор курьером'),
-#         ('Самому привезти', 'Самому привезти'),
-#         ('Мои заказы', 'Мои заказы'),
-#     ]
-
-#     order_id = models.AutoField(primary_key=True)
-#     user = models.ForeignKey(User, on_delete=models.CASCADE)
-#     storage_volume = models.PositiveIntegerField()
-#     storage_duration = models.PositiveIntegerField()
-#     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='active')
-
-#     # some_new_field = models.CharField(max_length=100, null=True)
-
-#     def __str__(self):
-#         return f"Order {self.order_id} by {self.user.name}"
-
-
-# class Warehouse(models.Model):
-#     warehouse_id = models.AutoField(primary_key=True)
-
-
-# # Напоминания
-# class Reminder(models.Model):
-#     reminder_id = models.AutoField(primary_key=True)  # Автоинкрементный ID
-#     user = models.ForeignKey(User, on_delete=models.CASCADE)  # Связь с пользователем
-#     message = models.TextField()  # Текст напоминания
-#     reminder_date = models.DateTimeField()  # Дата отправки напоминания
-
-#     def __str__(self):
-#         return f"Reminder for {self.user.name}: {self.message}"
-    
-    
-    
-    
-    
-    
-    
-    
-#     # Точка самовывоза        
-# class PickupPoint(models.Model):
-#     point_id = models.AutoField(primary_key=True)  # Автоинкрементный ID
-#     address = models.CharField(max_length=255)
-
-#     def __str__(self):
-#         return self.address
-
-
-# # Доставка
-# class Delivery(models.Model):
-#     delivery_id = models.AutoField(primary_key=True)  # Автоинкрементный ID
-#     order = models.ForeignKey(Order, on_delete=models.CASCADE)  # Связь с заказом
-#     delivery_address = models.CharField(max_length=255)
-
-#     def __str__(self):
-#         return f"Delivery for Order {self.order.order_id}"
+    def __str__(self):
+        return f" {self.promo_id}"
