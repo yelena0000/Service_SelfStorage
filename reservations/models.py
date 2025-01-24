@@ -14,6 +14,7 @@ class User(models.Model):
     user_address = models.CharField(verbose_name='Адрес клиента', max_length=200, null=True, blank=True)
 
     class Meta:
+        verbose_name = 'Пользователь'
         verbose_name_plural = 'Пользователи'
 
     def __str__(self):
@@ -31,6 +32,7 @@ class Warehouse(models.Model):
     warehouse_address = models.CharField(verbose_name='Адрес склада', max_length=255, null=True, blank=True)
 
     class Meta:
+        verbose_name = 'Склад'
         verbose_name_plural = 'Склады'
 
     def __str__(self):
@@ -65,6 +67,7 @@ class StorageUnit(models.Model):
     is_occupied = models.BooleanField(default=False, verbose_name='Занятость')
 
     class Meta:
+        verbose_name = 'Бокс хранения'
         verbose_name_plural = 'Боксы хранения'
 
     def __str__(self):
@@ -101,6 +104,7 @@ class Order(models.Model):
     start_date = models.DateTimeField(verbose_name='Дата начала аренды', default=timezone.now)
 
     class Meta:
+        verbose_name = 'Заказ'
         verbose_name_plural = 'Заказы'
 
     def __str__(self):
@@ -152,6 +156,8 @@ class Order(models.Model):
 
     def reminder_date(self):
         # Расчет даты напоминания о окончания срока хранения
+        if self.storage_duration <= 14:
+            return self.start_date
         return self.start_date + timedelta(days=self.storage_duration-14) if self.start_date else None
 
 

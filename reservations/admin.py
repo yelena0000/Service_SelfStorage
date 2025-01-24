@@ -16,7 +16,7 @@ class OrderInline(admin.TabularInline):
 
 @admin.register(User)
 class UserAdmin(admin.ModelAdmin):
-    list_display = ('user_id', 'name', 'phone_number')  # Отображаем ФИО и тел
+    list_display = ('user_id', 'name', 'user_address','phone_number')  # Отображаем ФИО и тел
     inlines = [OrderInline]                             # Отображение связанных заказов в форме другой модели
 
 
