@@ -129,27 +129,28 @@ class Order(models.Model):
             if overlapping_orders.exists():
                 raise ValidationError("Ячейка уже забронирована на этот период.")
 
-        # Устанавливаем статус заказа
-        if self.start_date > now:
-            self.status = 'pending'     # Если дата начала в будущем
-        elif self.start_date <= now < self.start_date + timedelta(days=self.storage_duration):
-            self.status = 'active'      # Если текущая дата в пределах срока аренды
-        else:
-            self.status = 'expired'     # Если текущая дата после окончания срока аренды
-        try:
-            super().save(*args, **kwargs)
-        except ValidationError as e:
-            raise ValidationError(f"Ошибка при сохранении заказа: {str(e)}")
+        # Если статус не задан вручную, определяем его автоматически
+        if self.status not in ['completed', 'expired']:
+            if self.start_date > now:
+                self.status = 'pending'  # Если дата начала в будущем
+            elif self.start_date <= now < self.start_date + timedelta(days=self.storage_duration):
+                self.status = 'active'  # Если текущая дата в пределах срока аренды
+            else:
+                self.status = 'expired'  # Если текущая дата после окончания срока аренды
+
+        super().save(*args, **kwargs)
 
         # Обновляем занятость ячейки
         self.storage_unit.is_occupied = self.status in ['active', 'pending']
         self.storage_unit.save()
+
 
     def release_storage_unit(self):
         # Освобождает ячейку хранения. Устанавливает флаг is_occupied в False для ячейки.
         if self.storage_unit.is_occupied:
             self.storage_unit.is_occupied = False
             self.storage_unit.save()
+        print(f"[DEBUG] Освобождение ячейки для заказа ID={self.order_id}. Текущий статус: {self.status}")
 
     @property
     def calculated_total_cost(self):
