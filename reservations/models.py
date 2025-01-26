@@ -4,6 +4,7 @@ from datetime import timedelta
 from django.db.models.signals import post_delete
 from django.dispatch import receiver
 from django.core.exceptions import ValidationError
+from reservations.link_statistics import shorten_link, count_clikcs
 
 
 # Пользователь
@@ -71,7 +72,7 @@ class StorageUnit(models.Model):
         verbose_name_plural = 'Боксы хранения'
 
     def __str__(self):
-        return f"{self.get_size_display()} - {'Занята' if self.has_active_orders() else 'Свободна'}"
+        return f'{self.get_size_display()}' #- {'Занята' if self.has_active_orders() else 'Свободна'}"
 
     def has_active_orders(self):
         # Проверяет, есть ли активные заказы для данной ячейки
@@ -100,7 +101,7 @@ class Order(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, verbose_name='Пользователь')
     storage_unit = models.ForeignKey(StorageUnit, on_delete=models.CASCADE, verbose_name='Ячейка хранения')
     storage_duration = models.PositiveIntegerField(verbose_name='Срок хранения (дни)')
-    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='active', verbose_name='Статус заказа')
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='active', verbose_name='Статус заказа', db_index=True)
     start_date = models.DateTimeField(verbose_name='Дата начала аренды', default=timezone.now)
 
     class Meta:
@@ -111,7 +112,7 @@ class Order(models.Model):
         return f"Заказ {self.order_id} от {self.user.name}"
 
     def is_expired(self):
-        # Проверяет, просрочен ли заказ
+        # Проверяет, просрочен ли заказ. Возвращает True, если текущая дата больше даты окончания аренды.
         return timezone.now() > self.start_date + timedelta(days=self.storage_duration)
 
     def save(self, *args, **kwargs):
@@ -135,15 +136,17 @@ class Order(models.Model):
             self.status = 'active'      # Если текущая дата в пределах срока аренды
         else:
             self.status = 'expired'     # Если текущая дата после окончания срока аренды
-
-        super().save(*args, **kwargs)
+        try:
+            super().save(*args, **kwargs)
+        except ValidationError as e:
+            raise ValidationError(f"Ошибка при сохранении заказа: {str(e)}")
 
         # Обновляем занятость ячейки
         self.storage_unit.is_occupied = self.status in ['active', 'pending']
         self.storage_unit.save()
 
     def release_storage_unit(self):
-        # Освобождает ячейку хранения
+        # Освобождает ячейку хранения. Устанавливает флаг is_occupied в False для ячейки.
         if self.storage_unit.is_occupied:
             self.storage_unit.is_occupied = False
             self.storage_unit.save()
@@ -170,13 +173,29 @@ def user_post_delete_handler(sender, instance, **kwargs):
         order.delete()  # Удаляем заказ
 
 
-# Реклама
-class Advertisement(models.Model):
-    promo_id = models.AutoField(primary_key=True)
-    promo_name = models.CharField(verbose_name='', max_length=200)
+class Link(models.Model):
+    original_url = models.URLField(verbose_name='Оригинальная ссылка')
+    short_url = models.CharField(verbose_name='Сокращенная ссылка', max_length=10, blank=True)
+    click_count = models.IntegerField(verbose_name='Кол-во кликов', default=0, null=True, blank=True)
 
     class Meta:
-        verbose_name_plural = 'Реклама'
+        verbose_name = 'Ссылка'
+        verbose_name_plural = 'Ссылки'
+
+    def save(self, *args, **kwargs):
+        if not self.short_url:
+            self.short_url = shorten_link(self.original_url)
+        super().save(*args, **kwargs)
+        self.update_click_count()
+
+    def update_click_count(self):
+        if self.short_url:
+            try:
+                new_click_count = count_clikcs(self.short_url)
+                self.click_count = new_click_count
+                self.save()
+            except Exception as e:
+                print(f"Ошибка при обновлении количества кликов: {e}")
 
     def __str__(self):
-        return f" {self.promo_id}"
+        return f'{self.short_url} -> {self.original_url} -> {self.click_count}'

@@ -1,7 +1,7 @@
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.utils.html import format_html
-from reservations.models import (Advertisement, Order, StorageUnit, User,
+from reservations.models import (Link, Order, StorageUnit, User,
                                  Warehouse)
 
 
@@ -127,26 +127,6 @@ class StorageUnitAdmin(admin.ModelAdmin):
     get_user_name.short_description = 'Кем занята'
 
 
-@admin.register(Advertisement)
-class AdvertisementAdmin(admin.ModelAdmin):
-    list_display = ('promo_name',)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+@admin.register(Link)
+class LinkAdmin(admin.ModelAdmin):
+    list_display = ('original_url', 'short_url', 'click_count')
