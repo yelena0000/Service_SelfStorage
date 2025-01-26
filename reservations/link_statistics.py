@@ -28,8 +28,7 @@ def shorten_link(url: str) -> str:
         requests.RequestException: При выполнении запроса к API VK.
     """
     token = get_token()
-    method = 'utils.getShortLink'
-    url_template = f'https://api.vk.com/method/{method}'
+    url_template = 'https://api.vk.com/method/utils.getShortLink'
     version = '5.199'
     params = {
         'access_token': token,
@@ -56,9 +55,8 @@ def count_clikcs(short_url) -> int:
     """
     token = get_token()
     parsed = urlparse(short_url)
-    method = 'utils.getLinkStats'
     version = '5.199'
-    url_template = f'https://api.vk.com/method/{method}'
+    url_template = 'https://api.vk.com/method/utils.getLinkStats'
 
     params = {
         'access_token': token,

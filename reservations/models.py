@@ -120,7 +120,7 @@ class StorageUnit(models.Model):
 
     def __str__(self) -> str:
         """Возвращает представление ячейки."""
-        return f"{self.get_size_display()}' - {'Занята' if self.has_active_orders() else 'Свободна'}"
+        return f"{self.get_size_display()}"
 
     def has_active_orders(self) -> bool:
         """Проверяет, есть ли активные заказы для данной ячейки.
@@ -234,7 +234,6 @@ class Order(models.Model):
         if self.storage_unit.is_occupied:
             self.storage_unit.is_occupied = False
             self.storage_unit.save()
-        print(f"[DEBUG] Освобождение ячейки для заказа ID={self.order_id}. Текущий статус: {self.status}")
 
     @property
     def calculated_total_cost(self) -> float:
@@ -286,7 +285,7 @@ class Link(models.Model):
         __str__(): Возвращает строковое представление ссылки.
     """
     original_url = models.URLField(verbose_name='Оригинальная ссылка')
-    short_url = models.CharField(verbose_name='Сокращенная ссылка', max_length=10, blank=True)
+    short_url = models.CharField(verbose_name='Сокращенная ссылка', max_length=100, blank=True)
     click_count = models.IntegerField(verbose_name='Кол-во кликов', default=0, null=True, blank=True)
 
     class Meta:
