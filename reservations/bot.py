@@ -2,11 +2,13 @@ import logging
 import os
 import random
 import re
+import time
 from datetime import datetime, timedelta
 from io import BytesIO
 
 import django
 import qrcode
+import schedule
 import telegram
 from django.core.exceptions import ValidationError
 from django.db.models import Count
@@ -163,11 +165,11 @@ def tariffs(update: Update, context: CallbackContext):
         "Мы не принимаем на хранение имущество, которое ограничено по законодательству РФ "
         "или создает неудобства для других арендаторов.\n\n"
         "❌*Нельзя хранить*:\n"
-        "- Оружие, боеприпасы, взрывчатые вещества\n"
-        "- Токсичные, радиоактивные и легковоспламеняющиеся вещества\n"
-        "- Животных\n"
-        "- Пищевые продукты с истекающим сроком годности\n"
-        "- Любое имущество, нарушающее законодательство РФ"
+        "- оружие, боеприпасы, взрывчатые вещества;\n"
+        "- токсичные, радиоактивные и легковоспламеняющиеся вещества;\n"
+        "- животных;\n"
+        "- пищевые продукты с истекающим сроком годности;\n"
+        "- любое имущество, нарушающее законодательство РФ."
     )
 
     update.message.reply_text(
@@ -376,7 +378,7 @@ def finalize_order_courier(update: Update, context: CallbackContext):
             # Адрес выводится только для курьера
             f"📍 Адрес: {context.user_data['address']}\n"
             f"🏷️ Ячейка хранения: {selected_unit.get_size_display()} "
-            f"(ID: {selected_unit.unit_id})\n\n"
+            f"(№ {selected_unit.unit_id})\n\n"
             f"- Общая стоимость: {order.calculated_total_cost} руб.\n\n"
             "Курьер свяжется с вами в ближайшее время. 😊",
             parse_mode=telegram.ParseMode.MARKDOWN
@@ -436,7 +438,7 @@ def finalize_order_self(update: Update, context: CallbackContext):
             f"📦 Срок хранения: {context.user_data['storage_duration']} дней\n"
             f"📍 Самостоятельная доставка: {order.storage_unit.warehouse.warehouse_address}\n"
             f"🏷️ Ячейка хранения: {selected_unit.get_size_display()} "
-            f"(ID: {selected_unit.unit_id})\n\n"
+            f"(№ {selected_unit.unit_id})\n\n"
             f"- Общая стоимость: {order.calculated_total_cost} руб.\n\n",
             parse_mode=telegram.ParseMode.MARKDOWN
         )
@@ -553,9 +555,10 @@ def handle_pickup_order(update: Update, context: CallbackContext):
 
         # Отправляем QR-код пользователю
         query.message.reply_photo(photo=InputFile(buffer, filename=f"order_{order_id}_qr.png"),
-                                  caption=f"🔑 Вот ваш QR-код для открытия ячейки "
-                                          f"{order.storage_unit.unit_id}, "
-                                  f"ID заказа: {order_id}")
+                                  caption=f"🔑 Ваш QR-код для открытия ячейки "
+                                          f"№ {order.storage_unit.unit_id}.\n\n"
+                                          f"Спасибо, что выбрали наш сервис❤️ "
+                                  )
 
         # Меняем статус заказа на "completed"
         order.status = 'completed'
@@ -573,6 +576,37 @@ def handle_pickup_order(update: Update, context: CallbackContext):
     except Exception as e:
         query.message.reply_text("❌ Произошла ошибка при обработке заказа.")
         print(f"[ERROR] Непредвиденная ошибка: {e}")
+
+
+def send_reminder(bot, order_id):
+    try:
+        order = Order.objects.get(order_id=order_id)
+        user_id = order.user.user_id
+        message = (
+            f"🔔 Напоминание!\n"
+            f"Ваш заказ №{order_id} заканчивает срок хранения через 14 дней.\n"
+            f"📍 Адрес: {order.storage_unit.warehouse.warehouse_address or 'Не указан'}\n"
+            f"Пожалуйста, освободите ячейку в указанный срок."
+        )
+        bot.send_message(chat_id=user_id, text=message)
+    except Exception as e:
+        print(f"Ошибка при отправке уведомления: {e}")
+
+
+def check_and_send_reminders(bot):
+    now = timezone.now()
+    orders_to_remind = Order.objects.filter(reminder_date__lte=now)
+
+    for order in orders_to_remind:
+        send_reminder(bot, order.order_id)
+
+
+def schedule_reminders(bot):
+    schedule.every().day.at("03:22").do(check_and_send_reminders, bot=bot)
+
+    while True:
+        schedule.run_pending()  # Выполняем все задачи, когда приходит их время
+        time.sleep(1)  # Ожидаем, чтобы не загружать процессор
 
 
 def cancel(update: Update, context: CallbackContext):
@@ -689,6 +723,8 @@ def main():
     # Запуск бота
     updater.start_polling()
     updater.idle()
+
+    schedule_reminders(bot)
 
 
 if __name__ == '__main__':
