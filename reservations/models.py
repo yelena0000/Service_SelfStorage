@@ -200,6 +200,7 @@ class Order(models.Model):
         return timezone.now() > self.start_date + timedelta(days=self.storage_duration)
 
     def save(self, *args: Any, **kwargs: Any) -> None:
+        print(f"[DEBUG] Сохранение заказа {self.order_id}: статус = {self.status}")
         """Сохраняет заказ и проверяет доступность ячейки.
 
         Если ячейка уже занята на указанный период, вызывает ValidationError.
@@ -222,10 +223,9 @@ class Order(models.Model):
                 self.status = 'active'
             else:
                 self.status = 'expired'
-            try:
-                super().save(*args, **kwargs)
-            except ValidationError as e:
-                raise ValidationError(f"Ошибка при сохранении заказа: {str(e)}")
+
+        super().save(*args, **kwargs)
+
         self.storage_unit.is_occupied = self.status in ['active', 'pending']
         self.storage_unit.save()
 
